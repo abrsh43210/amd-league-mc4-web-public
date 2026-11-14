@@ -1,0 +1,6 @@
+# torch comes from the mandated ROCm base image; do not pin another one here.
+transformers==5.22.2
+huggingface-hub==2.4.0
+requests==2.32.5
+beautifulsoup4==4.14.2
+pypdf==6.17.0

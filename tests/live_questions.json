@@ -1,0 +1,15 @@
+{
+  "note": "Real-web smoke set for CI (tests/live_recall.py). Checks retrieval only: is the answer inside the context the model would read? Easy, stable facts; not the graded set.",
+  "questions": [
+    {"question": "In what year did the Eiffel Tower open?", "answer": ["1889"]},
+    {"question": "What is the capital city of Australia?", "answer": ["Canberra"]},
+    {"question": "Who wrote the novel Things Fall Apart?", "answer": ["Achebe"]},
+    {"question": "What TCP port does HTTPS use by default?", "answer": ["443"]},
+    {"question": "In which year was the Python programming language first released?", "answer": ["1991"]},
+    {"question": "What is the highest mountain in Ethiopia?", "answer": ["Ras Dashen", "Ras Dejen", "Ras Dashan"]},
+    {"question": "How many member states does the African Union have?", "answer": ["55"]},
+    {"question": "Who is the CEO of AMD?", "answer": ["Lisa Su"]},
+    {"question": "What software license is the Python requests library released under?", "url": "https://github.com/psf/requests", "answer": ["Apache"]},
+    {"question": "What is the boiling point of water at sea level in degrees Fahrenheit?", "answer": ["212"]}
+  ]
+}

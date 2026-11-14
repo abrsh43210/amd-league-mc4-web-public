@@ -1,0 +1,19 @@
+{
+  "note": "Offline test set for the fake web (tests/fake_web.py). {BASE} is replaced by the fixture server address.",
+  "questions": [
+    {"id": "q01", "question": "In what year did the Eiffel Tower open?", "answer": "1889",
+     "cite": "eiffel.html", "what": "infobox table row; nav and footer carry decoy years"},
+    {"id": "q02", "question": "What was Orrery Systems' total revenue in fiscal 2025?", "answer": "4,210 million dollars",
+     "aliases": ["4,210 million"], "cite": "orrery_report_2025.pdf", "what": "PDF page"},
+    {"id": "q03", "question": "What was the population of Aldermoor in the 2020 census?", "answer": "1,234,567",
+     "cite": "city.html", "what": "number with thousands separators, a near-miss 2010 figure"},
+    {"id": "q04", "question": "How much does standard shipping to Canada cost?", "url": "{BASE}/shop/index.html",
+     "answer": "$12.50", "cite": "shop/shipping.html", "what": "start URL, answer one link deep, site not indexed"},
+    {"id": "q05", "question": "What is the battery life of the Nimbus X2 headphones?", "url": "{BASE}/shop/index.html",
+     "answer": "38 hours", "cite": "shop/products.html", "what": "start URL + table with header row; a rumour page says 30 hours"},
+    {"id": "q06", "question": "According to {BASE}/shop/index.html, who is the chief technology officer of Nimbus Audio?",
+     "answer": "Daniel Reyes", "cite": "shop/about.html", "what": "start URL inside the question text"},
+    {"id": "q07", "question": "What is the phone number of the Zorblat embassy on Mars?", "answer": "",
+     "cite": "", "what": "unanswerable: must return an empty answer and no citations"}
+  ]
+}
