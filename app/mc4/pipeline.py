@@ -56,15 +56,80 @@ def norm(s: str) -> str:
     return re.sub(r"[^0-9a-zÀ-￿]+", "", s)
 
 
-def grounded(answer: str, text: str) -> bool:
-    a = norm(answer)
+# -- grounding ------------------------------------------------------------------
+# An answer is grounded when it appears in the source text. Numbers are compared as
+# whole numbers ("12" is not found inside "2012" or "1,200"), and a few exact
+# equivalences are accepted: the same calendar date written another way,
+# percent / %, and British / American unit spellings. Nothing here is fuzzy.
+
+_MONTHS = {m: i + 1 for i, m in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july", "august",
+     "september", "october", "november", "december"])}
+_MONTHS.update({m[:3]: i for m, i in list(_MONTHS.items())})
+_MONTHS["sept"] = 9
+_MON = "(" + "|".join(sorted(_MONTHS, key=len, reverse=True)) + r")\.?"
+_DAY = r"(\d{1,2})(?:st|nd|rd|th)?"
+_DATE_MDY = re.compile(rf"\b{_MON}\s+{_DAY}\s*,?\s+(\d{{4}})\b")
+_DATE_DMY = re.compile(rf"\b{_DAY}\s+(?:of\s+)?{_MON}\s*,?\s+(\d{{4}})\b")
+_DATE_ISO = re.compile(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b")
+_TOKEN = re.compile(r"\d+(?:\.\d+)*|[a-zÀ-\uffff]+")
+_SPELLING = {
+    "metre": "meter", "metres": "meters", "kilometre": "kilometer", "kilometres": "kilometers",
+    "centimetre": "centimeter", "centimetres": "centimeters", "millimetre": "millimeter",
+    "millimetres": "millimeters", "litre": "liter", "litres": "liters",
+    "millilitre": "milliliter", "millilitres": "milliliters",
+    "tonne": "ton", "tonnes": "tons", "pct": "percent",
+}
+
+
+def _iso(y: str, m: int, d: str) -> str:
+    return f" isodate {int(y):04d}{m:02d}{int(d):02d} " if 1 <= m <= 12 and 1 <= int(d) <= 31 else ""
+
+
+def _dates(s: str) -> str:
+    """Rewrite every recognisable calendar date as one canonical token pair."""
+    s = _DATE_MDY.sub(lambda m: _iso(m.group(3), _MONTHS[m.group(1)], m.group(2)) or m.group(0), s)
+    s = _DATE_DMY.sub(lambda m: _iso(m.group(3), _MONTHS[m.group(2)], m.group(1)) or m.group(0), s)
+    return _DATE_ISO.sub(lambda m: _iso(m.group(1), int(m.group(2)), m.group(3)) or m.group(0), s)
+
+
+def _tokens(s: str, dates: bool = False) -> list[str]:
+    s = s.lower().replace("\u2013", "-").replace("\u2014", "-")
+    s = re.sub(r"(?<=\d),(?=\d{3})", "", s)          # 1,234 -> 1234
+    if dates:
+        s = _dates(s)
+    s = s.replace("%", " percent ").replace("per cent", "percent")
+    out = []
+    for t in _TOKEN.findall(s):
+        if t[0].isdigit() and t.count(".") == 1:      # 12.50 -> 12.5, 3.0 -> 3
+            t = t.rstrip("0").rstrip(".")
+        out.append(_SPELLING.get(t, t))
+    return out
+
+
+def _rep(s: str, dates: bool = False) -> str:
+    """Comparable form: words run together (so "Wi-Fi" equals "WiFi"), every number
+    fenced as |n| (so a number only ever matches a whole number)."""
+    return "".join(f"|{t}|" if t[0].isdigit() else t for t in _tokens(s, dates))
+
+
+def _one_grounded(answer: str, text: str) -> bool:
+    a = _rep(answer)
     if not a:
         return False
-    t = norm(text)
-    if a in t:
+    if a in _rep(text):
         return True
-    parts = [norm(p) for p in re.split(r",|;| and ", answer) if norm(p)]
-    return len(parts) > 1 and all(p in t for p in parts)
+    a_d = _rep(answer, dates=True)                    # same date, written differently
+    return "isodate" in a_d and a_d in _rep(text, dates=True)
+
+
+def grounded(answer: str, text: str) -> bool:
+    if not norm(answer):
+        return False
+    if _one_grounded(answer, text):
+        return True
+    parts = [p for p in re.split(r",|;| and ", answer) if norm(p)]
+    return len(parts) > 1 and all(_one_grounded(p, text) for p in parts)
 
 
 def clean_answer(a: str) -> str:

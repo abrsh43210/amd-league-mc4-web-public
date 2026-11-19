@@ -99,6 +99,31 @@ for args, stems in cases:
             fails += 1
             print(f"robust {st}: FAIL {e} rc={r.returncode} stderr={r.stderr[-300:]}")
 
+# Grounding check: a number must match a whole number, and the same value written
+# another way (date order, percent sign, metre/meter) must still count as found.
+sys.path.insert(0, str(ROOT / "app"))
+from mc4.pipeline import grounded  # noqa: E402
+
+PAGE = ("The tower opened on March 31, 1889 and is 330 metres tall. Visitors rose 12.5% in 2012 "
+        "to 1,200 a day. A ticket costs $12.50 and the lift has Wi-Fi 6, firmware 2.13.0.")
+GROUNDING = [
+    # false accepts that v2 let through: a short number inside a longer one
+    ("12", False), ("20", False), ("13", False), ("2.5", False), ("2.13", False), ("331 metres", False),
+    ("1889 and 12", False), ("30 March 1889", False), ("Wi-Fi 60", False),
+    # exact values still pass
+    ("1889", True), ("2012", True), ("1,200", True), ("1200", True), ("330", True), ("12.5", True),
+    ("$12.50", True), ("2.13.0", True), ("WiFi 6", True), ("March 31, 1889", True),
+    # false rejects that v2 dropped: same value, different spelling
+    ("31 March 1889", True), ("1889-03-31", True), ("31st of March, 1889", True), ("Mar 31 1889", True),
+    ("330 meters", True), ("12.5 percent", True), ("12.5 per cent", True), ("12.5 %", True),
+    ("March 31, 1889, 330 meters", True),
+    ("", False),
+]
+g_bad = [(a, want) for a, want in GROUNDING if grounded(a, PAGE) != want]
+fails += len(g_bad)
+print(f"grounding: {len(GROUNDING) - len(g_bad)}/{len(GROUNDING)} ok" + "".join(
+    f"\n  !! grounded({a!r}) should be {want}" for a, want in g_bad))
+
 print(f"\nscore {score}/{len(QS)}   failures {fails}   work dir {work}")
 subprocess.run(["pkill", "-f", "mc4/server.py"])
 web.terminate()
