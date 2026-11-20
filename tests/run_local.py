@@ -124,6 +124,39 @@ fails += len(g_bad)
 print(f"grounding: {len(GROUNDING) - len(g_bad)}/{len(GROUNDING)} ok" + "".join(
     f"\n  !! grounded({a!r}) should be {want}" for a, want in g_bad))
 
+# A stalling search engine must not hold the whole search (it used to take 3x the
+# timeout, which left no time to read pages). Stub the HTTP layer: no network here.
+from mc4 import web as _web  # noqa: E402
+
+
+class _WikiOK:
+    status_code, text = 200, ""
+
+    def json(self):
+        return {"query": {"search": [{"title": "Eiffel Tower", "snippet": "opened in 1889"}]}}
+
+
+def _stub(stall):
+    def fake_get(url, timeout, method="GET", **kw):
+        if stall(url):
+            time.sleep(max(0.5, timeout))             # behaves like the real wall-clock cap
+            return None
+        return _WikiOK() if "api.php" in url else None
+    return fake_get
+
+
+_real_get, T = _web._get, 2.0
+for label, stall, need_hits in [("every engine stalls", lambda u: True, False),
+                                ("only DuckDuckGo stalls", lambda u: "duckduckgo" in u, True)]:
+    _web._get = _stub(stall)
+    t0 = time.time()
+    hits = _web.search(["When did the Eiffel Tower open?"], timeout=T)
+    took = time.time() - t0
+    ok = took <= T + 1.5 and (bool(hits) or not need_hits)
+    fails += not ok
+    print(f"stall ({label}): {'ok' if ok else 'FAIL'} search returned in {took:.1f}s (limit {T + 1.5:.1f}s), {len(hits)} hits")
+_web._get = _real_get
+
 print(f"\nscore {score}/{len(QS)}   failures {fails}   work dir {work}")
 subprocess.run(["pkill", "-f", "mc4/server.py"])
 web.terminate()

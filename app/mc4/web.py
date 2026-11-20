@@ -146,13 +146,24 @@ def _clean_result_url(href: str) -> str:
 
 
 def _ddg(query: str, timeout: float) -> list[Hit]:
+    # Up to three attempts (POST html, GET html, POST lite) share ONE deadline, so a
+    # stalling DuckDuckGo costs `timeout` seconds in total, not three times that.
+    end = time.time() + timeout
+
+    def left() -> float:
+        return end - time.time()
+
+    def good(resp) -> bool:
+        return resp is not None and resp.status_code == 200 and "result__a" in resp.text
+
     r = None
-    if "{q}" in DDG_URL and DDG_URL.startswith("https://html.duckduckgo.com"):
-        r = _get("https://html.duckduckgo.com/html/", timeout, "POST", data={"q": query, "kl": "us-en"})
-    if r is None or r.status_code != 200 or "result__a" not in r.text:
-        r = _get(DDG_URL.format(q=quote_plus(query)), timeout)
-    if (r is None or r.status_code != 200 or "result__a" not in r.text) and DDG_URL.startswith("https://html.duckduckgo.com"):
-        lite = _get("https://lite.duckduckgo.com/lite/", timeout, "POST", data={"q": query, "kl": "us-en"})
+    real = DDG_URL.startswith("https://html.duckduckgo.com")
+    if "{q}" in DDG_URL and real:
+        r = _get("https://html.duckduckgo.com/html/", left(), "POST", data={"q": query, "kl": "us-en"})
+    if not good(r) and left() > 0.5:
+        r = _get(DDG_URL.format(q=quote_plus(query)), left())
+    if not good(r) and real and left() > 0.5:
+        lite = _get("https://lite.duckduckgo.com/lite/", left(), "POST", data={"q": query, "kl": "us-en"})
         if lite is not None and lite.status_code == 200:
             soup = BeautifulSoup(lite.text, "html.parser")
             out = []
@@ -236,10 +247,12 @@ def _mojeek(query: str, timeout: float) -> list[Hit]:
 
 def _wiki(query: str, timeout: float) -> list[Hit]:
     params = {"action": "query", "list": "search", "srsearch": query, "format": "json", "srlimit": 4}
-    r = _get(WIKI_API + "?" + "&".join(f"{k}={quote_plus(str(v))}" for k, v in params.items()), timeout)
-    if r is not None and r.status_code == 429:
+    end = time.time() + timeout                       # the 429 retry shares this deadline
+    url = WIKI_API + "?" + "&".join(f"{k}={quote_plus(str(v))}" for k, v in params.items())
+    r = _get(url, timeout)
+    if r is not None and r.status_code == 429 and end - time.time() > 1.0:
         time.sleep(0.5)
-        r = _get(WIKI_API + "?" + "&".join(f"{k}={quote_plus(str(v))}" for k, v in params.items()), timeout)
+        r = _get(url, end - time.time())
     if not _status("wiki", r):
         return []
     try:
@@ -283,27 +296,31 @@ def search(queries: list[str], timeout: float) -> list[Hit]:
     best: dict[str, Hit] = {}
     if not jobs:
         return []
-    with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
-        futs = {ex.submit(_ENGINE_FN[e], q, timeout): (e, q) for e, q in jobs}
-        try:
-            for f in as_completed(futs, timeout=timeout + 1.0):
-                try:
-                    res = f.result()
-                except Exception as e:  # noqa: BLE001
-                    paths.log(f"engine {futs[f]} error {e}")
+    # No `with`: leaving a with-block waits for every engine thread, so one stalled
+    # engine would hold the whole search. Stragglers are abandoned instead (as in
+    # fetch_many); their requests are wall-clock capped and the process exits hard.
+    ex = ThreadPoolExecutor(max_workers=len(jobs))
+    futs = {ex.submit(_ENGINE_FN[e], q, timeout): (e, q) for e, q in jobs}
+    try:
+        for f in as_completed(futs, timeout=timeout + 1.0):
+            try:
+                res = f.result()
+            except Exception as e:  # noqa: BLE001
+                paths.log(f"engine {futs[f]} error {e}")
+                continue
+            paths.log(f"engine {futs[f][0]} -> {len(res)} hits")
+            for i, h in enumerate(res[:10]):
+                if not h.url:
                     continue
-                paths.log(f"engine {futs[f][0]} -> {len(res)} hits")
-                for i, h in enumerate(res[:10]):
-                    if not h.url:
-                        continue
-                    key = _norm_url(h.url)
-                    w = ENGINE_WEIGHT.get(futs[f][0], 1.0)
-                    scores[key] = scores.get(key, 0.0) + w / (2 + i) + (0.5 if i < 2 else 0.0)  # top-2 of every engine always surface
-                    if key not in best or len(h.snippet) > len(best[key].snippet):
-                        h.rank = i
-                        best[key] = h
-        except Exception:  # noqa: BLE001 - as_completed timeout: keep what we have
-            paths.log("search timed out; using partial results")
+                key = _norm_url(h.url)
+                w = ENGINE_WEIGHT.get(futs[f][0], 1.0)
+                scores[key] = scores.get(key, 0.0) + w / (2 + i) + (0.5 if i < 2 else 0.0)  # top-2 of every engine always surface
+                if key not in best or len(h.snippet) > len(best[key].snippet):
+                    h.rank = i
+                    best[key] = h
+    except Exception:  # noqa: BLE001 - as_completed timeout: keep what we have
+        paths.log("search timed out; using partial results")
+    ex.shutdown(wait=False, cancel_futures=True)
     order = sorted(scores, key=lambda k: -scores[k])
     return [best[k] for k in order]
 
