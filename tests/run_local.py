@@ -157,6 +157,79 @@ for label, stall, need_hits in [("every engine stalls", lambda u: True, False),
     print(f"stall ({label}): {'ok' if ok else 'FAIL'} search returned in {took:.1f}s (limit {T + 1.5:.1f}s), {len(hits)} hits")
 _web._get = _real_get
 
+# Throttled engines (v5). Stubbed HTTP again: each route is checked on its own.
+class _R:
+    def __init__(self, status, text="", data=None, headers=None):
+        self.status_code, self.text, self._d, self.headers = status, text, data, headers or {}
+
+    def json(self):
+        if self._d is None:
+            raise ValueError("no json")
+        return self._d
+
+
+def _throttle_case(label, fake, fn, want_urls, limit):
+    global fails
+    calls = []
+
+    def g(url, timeout, method="GET", **kw):
+        calls.append(url)
+        return fake(url, len(calls))
+    _web._get = g
+    t0 = time.time()
+    got = [h.url for h in fn("Eiffel Tower", 3.0)]
+    took = time.time() - t0
+    ok = got == want_urls and took <= limit
+    fails += not ok
+    print(f"throttle ({label}): {'ok' if ok else 'FAIL'} {len(calls)} requests, {took:.1f}s, {got}")
+
+
+_API = {"query": {"search": [{"title": "Eiffel Tower", "snippet": "opened in <b>1889</b>"}]}}
+_REST = {"pages": [{"key": "Eiffel_Tower", "title": "Eiffel Tower", "excerpt": "opened in <span>1889</span>"}]}
+_WURL = [_web.WIKI_API.rsplit("/w/api.php", 1)[0] + "/wiki/Eiffel_Tower"]
+_WHTML = ('<ul><li class="mw-search-result"><div class="mw-search-result-heading"><a href="/wiki/Eiffel_Tower" '
+          'title="Eiffel Tower">Eiffel Tower</a></div><div class="searchresult">opened in 1889</div></li></ul>')
+_throttle_case("Wikipedia API 429, REST route answers",
+               lambda u, n: _R(200, data=_REST) if "rest.php" in u else _R(429, headers={"retry-after": "20"}),
+               _web._wiki, _WURL, 1.0)
+_throttle_case("Wikipedia all routes 429, short Retry-After honoured",
+               lambda u, n: _R(200, data=_API) if n == 4 else _R(429, headers={"retry-after": "1"}),
+               _web._wiki, _WURL, 2.0)
+_throttle_case("Wikipedia all routes 429, long Retry-After not waited for",
+               lambda u, n: _R(429, headers={"retry-after": "20"}), _web._wiki, [], 1.0)
+_throttle_case("Wikipedia API answers garbage, REST route answers",
+               lambda u, n: _R(200, data=_REST) if "rest.php" in u else _R(200, text="<html>"),
+               _web._wiki, _WURL, 1.0)
+_throttle_case("Yahoo 500 then 200: one retry",
+               lambda u, n: _R(500) if n == 1 else _R(200, text='<div class="algo"><h3><a href="https://example.org/y">Y</a></h3></div>'),
+               _web._yahoo, ["https://example.org/y"], 1.5)
+_throttle_case("Yahoo 500 twice: gives up after one retry",
+               lambda u, n: _R(500), _web._yahoo, [], 1.5)
+_throttle_case("Wikipedia API and REST 429, search page answers",
+               lambda u, n: _R(200, text=_WHTML) if "index.php" in u else _R(429, headers={"retry-after": "20"}),
+               _web._wiki, _WURL, 1.0)
+
+
+# First-word junk from a throttled engine must rank below on-topic hits.
+def _junk_get(url, timeout, method="GET", **kw):
+    if "api.php" in url:
+        return _R(200, data={"query": {"search": [{"title": "Things Fall Apart", "snippet": "novel by Chinua Achebe"}]}})
+    if "bing" in url:
+        return _R(200, text="".join(f'<li class="b_algo"><h2><a href="https://dict{i}.example/wrote">WROTE definition</a></h2>'
+                                    f'<p>past tense of write</p></li>' for i in range(8)))
+    return None
+
+
+_web._get = _junk_get
+_e = _web.ENGINES[:]
+_web.ENGINES[:] = ["bing", "wiki"]
+_hits = _web.search(["Who wrote the novel Things Fall Apart?", "wrote novel things fall apart"], timeout=2.0)
+_web.ENGINES[:] = _e
+ok = len(_hits) == 9 and "Things_Fall_Apart" in _hits[0].url
+fails += not ok
+print(f"junk hits demoted: {'ok' if ok else 'FAIL'} first of {len(_hits)} = {_hits[0].url if _hits else None}")
+_web._get = _real_get
+
 print(f"\nscore {score}/{len(QS)}   failures {fails}   work dir {work}")
 subprocess.run(["pkill", "-f", "mc4/server.py"])
 web.terminate()

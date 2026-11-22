@@ -58,7 +58,7 @@ for q in qs:
             with open(LOG, encoding="utf-8") as fh:
                 fh.seek(pos)
                 for ln in fh.read().splitlines():
-                    if "failed" in ln or "timeout" in ln or " http " in ln:
+                    if "failed" in ln or "timeout" in ln or " http " in ln or "route" in ln or "-> " in ln:
                         print("      log ", ln[:200])
         for c in ctx[:3]:
             print(f"      ctx {c.score:5.2f} {c.url[:70]}  {c.text[:160]!r}")

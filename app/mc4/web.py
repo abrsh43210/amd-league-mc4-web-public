@@ -209,7 +209,12 @@ YAHOO_URL = os.environ.get("MC4_YAHOO_URL", "https://search.yahoo.com/search?p={
 
 
 def _yahoo(query: str, timeout: float) -> list[Hit]:
-    r = _get(YAHOO_URL.format(q=quote(query, safe="")), timeout)
+    end = time.time() + timeout
+    url = YAHOO_URL.format(q=quote(query, safe=""))
+    r = _get(url, timeout)
+    if r is not None and r.status_code >= 500 and end - time.time() > 1.5:
+        time.sleep(0.4)                               # one retry on a 5xx, inside the same deadline
+        r = _get(url, end - time.time())
     if not _status("yahoo", r):
         return []
     soup = BeautifulSoup(r.text, "html.parser")
@@ -245,27 +250,86 @@ def _mojeek(query: str, timeout: float) -> list[Hit]:
     return hits
 
 
+def _retry_after(r) -> float:
+    try:
+        return float(r.headers.get("retry-after", ""))
+    except (TypeError, ValueError):
+        return 0.5
+
+
 def _wiki(query: str, timeout: float) -> list[Hit]:
+    """Wikipedia search. The attempts share ONE deadline: the action API, then the
+    REST search endpoint, then the ordinary search page (separate routes, so a
+    throttled API does not end the search), then the action API once more if the
+    server's Retry-After fits."""
     params = {"action": "query", "list": "search", "srsearch": query, "format": "json", "srlimit": 4}
-    end = time.time() + timeout                       # the 429 retry shares this deadline
+    end = time.time() + timeout
+    base = WIKI_API.rsplit("/w/api.php", 1)[0]
+
+    def left() -> float:
+        return end - time.time()
+
+    def page_url(title: str) -> str:
+        return f"{base}/wiki/{quote_plus(title.replace(' ', '_'), safe='_()')}"
+
+    def text(html: str) -> str:
+        return BeautifulSoup(html or "", "html.parser").get_text(" ", strip=True)
+
+    def from_api(r) -> list[Hit] | None:
+        if r is None or r.status_code != 200:
+            return None
+        try:
+            items = r.json().get("query", {}).get("search", [])
+        except (ValueError, AttributeError):
+            return None
+        return [Hit(page_url(it.get("title", "")), it.get("title", ""), text(it.get("snippet")), "wiki") for it in items]
+
+    def from_rest(r) -> list[Hit] | None:
+        if r is None or r.status_code != 200:
+            return None
+        try:
+            items = r.json().get("pages", [])
+        except (ValueError, AttributeError):
+            return None
+        return [Hit(page_url(it.get("key") or it.get("title", "")), it.get("title", ""),
+                    text(it.get("excerpt")) or (it.get("description") or ""), "wiki") for it in items]
+
+    def from_html(r) -> list[Hit] | None:
+        if r is None or r.status_code != 200:
+            return None
+        soup = BeautifulSoup(r.text, "html.parser")
+        out = []
+        for li in soup.select("li.mw-search-result")[:4]:
+            a = li.select_one(".mw-search-result-heading a")
+            if not a or not a.get("href", "").startswith("/wiki/"):
+                continue
+            sn = li.select_one(".searchresult")
+            out.append(Hit(base + a["href"], a.get("title") or a.get_text(" ", strip=True),
+                           sn.get_text(" ", strip=True) if sn else "", "wiki"))
+        return out or None                            # an empty page may be a block page: keep trying
+
     url = WIKI_API + "?" + "&".join(f"{k}={quote_plus(str(v))}" for k, v in params.items())
     r = _get(url, timeout)
-    if r is not None and r.status_code == 429 and end - time.time() > 1.0:
-        time.sleep(0.5)
-        r = _get(url, end - time.time())
-    if not _status("wiki", r):
-        return []
-    try:
-        data = r.json()
-    except ValueError:
-        return []
-    base = WIKI_API.rsplit("/w/api.php", 1)[0]
-    hits = []
-    for it in data.get("query", {}).get("search", []):
-        title = it.get("title", "")
-        snip = BeautifulSoup(it.get("snippet", ""), "html.parser").get_text(" ", strip=True)
-        hits.append(Hit(f"{base}/wiki/{quote_plus(title.replace(' ', '_'), safe='_()')}", title, snip, "wiki"))
-    return hits
+    hits = from_api(r)
+    if hits is not None:
+        return hits
+    paths.log(f"engine wiki http {getattr(r, 'status_code', 'none')}; trying the REST search route")
+    wait = _retry_after(r) if r is not None and r.status_code == 429 else None
+    if left() > 1.0:
+        hits = from_rest(_get(f"{base}/w/rest.php/v1/search/page?q={quote_plus(query)}&limit=4", left()))
+        if hits is not None:
+            return hits
+    if left() > 1.0:
+        hits = from_html(_get(f"{base}/w/index.php?search={quote_plus(query)}&ns0=1&fulltext=1", left()))
+        if hits is not None:
+            return hits
+    if wait is not None and left() - wait > 1.0:
+        time.sleep(wait)
+        hits = from_api(_get(url, left()))
+        if hits is not None:
+            return hits
+    paths.log("engine wiki: no route answered")
+    return []
 
 
 ENGINE_WEIGHT = {"wiki": 1.5, "ddg": 1.2, "yahoo": 1.1, "bing": 1.0, "mojeek": 0.9}
@@ -296,6 +360,15 @@ def search(queries: list[str], timeout: float) -> list[Hit]:
     best: dict[str, Hit] = {}
     if not jobs:
         return []
+    # A throttled engine sometimes answers a query with results for its first word
+    # alone ("wrote ..." -> dictionary pages). A hit that shares fewer than two of
+    # the question's terms is kept, but ranked below every on-topic hit.
+    qterms = [t for t in terms(queries[0]) if not t.startswith("http")]
+    need = min(2, len(qterms))
+
+    def on_topic(h: Hit) -> bool:
+        text = f"{h.title} {h.snippet} {unquote(h.url)}".lower()
+        return sum(1 for t in qterms if t in text or (len(t) > 4 and t[:-1] in text)) >= need
     # No `with`: leaving a with-block waits for every engine thread, so one stalled
     # engine would hold the whole search. Stragglers are abandoned instead (as in
     # fetch_many); their requests are wall-clock capped and the process exits hard.
@@ -314,7 +387,8 @@ def search(queries: list[str], timeout: float) -> list[Hit]:
                     continue
                 key = _norm_url(h.url)
                 w = ENGINE_WEIGHT.get(futs[f][0], 1.0)
-                scores[key] = scores.get(key, 0.0) + w / (2 + i) + (0.5 if i < 2 else 0.0)  # top-2 of every engine always surface
+                gain = w / (2 + i) + (0.5 if i < 2 else 0.0)   # top-2 of every engine always surface
+                scores[key] = scores.get(key, 0.0) + (gain if on_topic(h) else gain * 0.05)
                 if key not in best or len(h.snippet) > len(best[key].snippet):
                     h.rank = i
                     best[key] = h
@@ -438,11 +512,15 @@ def _fetch_wiki(url: str, m, timeout: float) -> Page:
 
 def fetch(url: str, timeout: float) -> Page:
     m = _WIKI_PAGE.match(url)
+    end = time.time() + timeout
     if m and not WIKI_API.startswith("http://127."):
-        p = _fetch_wiki(url, m, timeout)
+        # The parse API gives the cleanest text but is the first thing Wikipedia
+        # throttles; cap it so the ordinary page still fits in the same budget.
+        p = _fetch_wiki(url, m, max(1.0, timeout * 0.6))
         if p.ok:
             return p
-    r = _get(url, timeout)
+        paths.log(f"wiki parse route failed for {url[:100]}; fetching the page itself")
+    r = _get(url, max(1.0, end - time.time()))
     if r is None or r.status_code >= 400:
         return Page(url=url)
     ctype = (r.headers.get("content-type") or "").lower()
