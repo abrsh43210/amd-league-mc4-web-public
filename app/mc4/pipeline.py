@@ -30,20 +30,33 @@ CONTEXT_WORDS = 1500
 SYSTEM = ("You answer questions using only the numbered web sources you are given. "
           "Reply with one JSON object and nothing else.")
 
-PROMPT = """QUESTION: {q}
+_HEAD = """QUESTION: {q}
 
 SOURCES:
 {sources}
 
 Rules:
 - "answer": the shortest exact answer: a name, number, date, version or short phrase, copied from the source wording. Keep a unit only when the question needs it. Never a full sentence, never a label like "Answer:".
-- If the question asks for several items, separate them with ", ".
-- If sources disagree, prefer the official or primary source and the most recent figure.
+- Answer exactly what is asked: for "who" or "which" give the name itself, not a description of it.
+- If the question asks for several items, or asks two things (for example who and when), give all of them separated by ", ".
+- If sources disagree, prefer the official or primary source and the most recent figure. Ignore entries described as former, previous or brief.
 - "source": the id of the source that states the answer, e.g. "S2".
 - "quote": the exact words (at most 25) from that source that contain the answer.
-- If no source contains the answer, reply {{"found": false}}.
-
+"""
+_TAIL = """
 JSON: {{"found": true, "answer": "...", "source": "S1", "quote": "..."}}"""
+
+# First read: the model may ask for one more lookup when the question needs two steps.
+PROMPT = _HEAD + """- If the question is about something that must first be identified (for example "the year the university where X studied was founded") and the sources identify it but do not state the final fact about it, reply {{"found": false, "search": "a short web search query for the missing fact"}}.
+- If no source contains the answer, reply {{"found": false}}.
+""" + _TAIL
+# Last read: answer or say not found.
+PROMPT_FINAL = _HEAD + """- If no source contains the answer, reply {{"found": false}}.
+""" + _TAIL
+
+EXPAND = """Write one short web search query (at most 8 words) that would find the answer to this question. If the question refers to something indirectly (for example "the university where X studied" or "the element named after Y's homeland"), name that thing directly using what you know. Reply with the query only.
+
+QUESTION: {q}"""
 
 REFORMULATE = """Write one short web search query (at most 10 words) that would find the answer to this question. Reply with the query only.
 
@@ -132,6 +145,22 @@ def grounded(answer: str, text: str) -> bool:
     return len(parts) > 1 and all(_one_grounded(p, text) for p in parts)
 
 
+def _mostly(a: str, text: str, share: float) -> bool:
+    """At least `share` of a's tokens are tokens of text (order ignored)."""
+    ta = _tokens(a)
+    if not ta:
+        return False
+    tt = set(_tokens(text))
+    return sum(1 for t in ta if t in tt) >= share * len(ta)
+
+
+def partly_grounded(answer: str, text: str) -> bool:
+    """A list answer of three or more items where at least two thirds of the items
+    appear in the text (a source often spells one name of a long list differently)."""
+    parts = [p for p in re.split(r",|;| and ", answer) if norm(p)]
+    return len(parts) >= 3 and sum(1 for p in parts if _one_grounded(p, text)) * 3 >= len(parts) * 2
+
+
 def clean_answer(a: str) -> str:
     a = str(a or "").strip().strip('"').strip()
     a = re.sub(r"^(the )?answer( is)?\s*[:\-]?\s*", "", a, flags=re.I)
@@ -140,15 +169,28 @@ def clean_answer(a: str) -> str:
     return a.strip()
 
 
+_FIELD = r'"%s"\s*:\s*"((?:[^"\\]|\\.)*)"'
+
+
 def parse_json(text: str) -> dict:
     m = re.search(r"\{.*\}", text or "", re.S)
-    if not m:
-        return {}
-    try:
-        v = json.loads(m.group(0))
-        return v if isinstance(v, dict) else {}
-    except ValueError:
-        return {}
+    if m:
+        try:
+            v = json.loads(m.group(0))
+            return v if isinstance(v, dict) else {}
+        except ValueError:
+            pass
+    # A long list answer can use up the output budget before the closing brace:
+    # keep the fields that were written completely.
+    out = {}
+    for k in ("answer", "source", "quote"):
+        f = re.search(_FIELD % k, text or "")
+        if f:
+            try:
+                out[k] = json.loads(f'"{f.group(1)}"')
+            except ValueError:
+                out[k] = f.group(1)
+    return out if out.get("answer") else {}
 
 
 def _start_urls(question: str, url: str | None) -> list[str]:
@@ -178,6 +220,9 @@ class Session:
         self.seen: set[str] = set()
         self.tokens_used = 0
         self.hits: list = []
+        self.next_query = ""                          # follow-up search the model asked for
+        self.extra = ""                               # the model's own search query for the question
+        self.unverified: tuple[str, list[str], float] | None = None   # answer not found on any page read
 
     def left(self) -> float:
         return self.t_end - time.time()
@@ -206,6 +251,8 @@ class Session:
 
     def _search(self) -> list[web.Page]:
         qs = _queries(self.q)
+        if self.extra:
+            qs.append(self.extra)
         if self.starts:
             host = urlparse(self.starts[0]).netloc.removeprefix("www.")
             qs.append(f"site:{host} " + " ".join(terms(self.q)[:8]))
@@ -220,7 +267,23 @@ class Session:
         self.seen.update(urls)
         return web.fetch_many(urls, min(time.time() + 8, self.t_end - 8))
 
+    def expand(self) -> None:
+        """One short model call: a direct search query, with indirect references
+        resolved ("the university where Turing earned his PhD" -> "Princeton")."""
+        try:
+            raw = self.llm.chat("", EXPAND.format(q=self.q), max_new_tokens=24)
+        except Exception as e:  # noqa: BLE001
+            paths.log(f"expand failed: {type(e).__name__}: {e}")
+            return
+        line = next((ln for ln in str(raw).splitlines() if ln.strip()), "")
+        x = " ".join(URL_RE.sub("", line).strip().strip('"\'').split()[:10])[:120]
+        if norm(x) and norm(x) not in norm(self.q) and norm(self.q) not in norm(x):
+            self.extra = x
+            paths.log(f"extra query: {x!r}")
+
     def gather(self) -> None:
+        if self.llm is not None and not self.starts:  # a given page is the place to look: no rewriting
+            self.expand()
         with ThreadPoolExecutor(max_workers=2) as ex:
             f_start = ex.submit(self._crawl_start) if self.starts else None
             f_search = ex.submit(self._search)
@@ -245,9 +308,9 @@ class Session:
         self._add(web.fetch_many(cand, min(time.time() + 6, self.t_end - 6)), 30)
 
     # -- reading -------------------------------------------------------------------
-    def context(self) -> list[Chunk]:
+    def context(self, extra: str = "") -> list[Chunk]:
         picked, words, texts = [], 0, set()
-        for c in rank(self.q, list(self.chunks)):
+        for c in rank(f"{self.q} {self.extra} {extra}".strip(), list(self.chunks)):
             key = norm(c.text)[:200]
             if key in texts or c.score <= 0:
                 continue
@@ -261,20 +324,30 @@ class Session:
                 break
         return picked
 
-    def ask(self, ctx: list[Chunk]) -> tuple[str, list[str], float]:
+    def ask(self, ctx: list[Chunk], final: bool = False) -> tuple[str, list[str], float]:
         if not ctx:
             return "", [], 0.0
         src = "\n\n".join(f"[S{i + 1}] {c.title[:90]} ({c.url})\n{c.text}" for i, c in enumerate(ctx))
-        raw = self.llm.chat(SYSTEM, PROMPT.format(q=self.q, sources=src), max_new_tokens=120)
+        raw = self.llm.chat(SYSTEM, (PROMPT_FINAL if final else PROMPT).format(q=self.q, sources=src),
+                            max_new_tokens=160)
         d = parse_json(raw)
         paths.log(f"llm: {raw[:300]!r}")
         if not d or d.get("found") is False:
+            nq = d.get("search") if d else ""
+            self.next_query = " ".join(str(nq).split())[:200] if isinstance(nq, str) else ""
             return "", [], 0.0
         ans = clean_answer(d.get("answer", ""))
         if not ans or re.fullmatch(r"\[?S\d+\]?", ans):        # empty, or a source id instead of an answer
             return "", [], 0.0
         m = re.search(r"\d+", str(d.get("source", "")))
         cited = ctx[int(m.group(0)) - 1] if m and 0 < int(m.group(0)) <= len(ctx) else None
+        if not norm(ans):                             # punctuation-only answer, e.g. a separator: literal match
+            lit = " ".join(ans.split())
+            for c in ([cited] if cited else []) + ctx:
+                if lit and lit in " ".join(c.text.split()):
+                    return ans, [c.url], 0.6
+            paths.log(f"ungrounded symbol answer dropped: {ans!r}")
+            return "", [], 0.0
         if cited and grounded(ans, cited.text):
             return ans, [cited.url], 0.9
         quote = str(d.get("quote", ""))
@@ -283,8 +356,15 @@ class Session:
                 return ans, [c.url], 0.7
         if cited and quote and norm(quote) and norm(quote) in norm(cited.text) and not norm(ans) in norm(self.q):
             return ans, [cited.url], 0.5             # paraphrased value, quote is real
-        paths.log(f"ungrounded answer dropped: {ans!r}")
-        return "", [], 0.0                            # not on any page we read: do not guess
+        if cited and partly_grounded(ans, cited.text):
+            return ans, [cited.url], 0.5             # long list, most items on the cited page
+        if (cited and len(_tokens(quote)) >= 5 and _mostly(quote, cited.text, 0.9)
+                and _mostly(ans, quote + " " + cited.text, 0.8) and not norm(ans) in norm(self.q)):
+            return ans, [cited.url], 0.4             # quote slightly reworded, answer words are on the page
+        paths.log(f"ungrounded answer set aside: {ans!r}")
+        if self.unverified is None and not norm(ans) in norm(self.q):
+            self.unverified = (ans, [cited.url] if cited else [ctx[0].url], 0.2)
+        return "", [], 0.0                            # not on any page we read
 
     def heuristic(self, ctx: list[Chunk]) -> tuple[str, list[str], float]:
         """No model available: return the best-matching sentence from the best chunk."""
@@ -319,22 +399,32 @@ def answer(question: str, start_url: str | None = None, deadline_s: float | None
     except Exception as e:  # noqa: BLE001
         paths.log(f"llm failed: {type(e).__name__}: {e}")
         return s.heuristic(ctx)
-    if a or s.left() < 9:
+    if a:
         return a, cites, conf
+    # Last resort when nothing better turns up: the model's answer that could not be
+    # found on a page, marked with low confidence (an empty answer can never be right).
+    last = s.unverified or ("", [], 0.0)
+    if s.left() < 9:
+        return last
     # Second chance: follow links from the best pages, or search again with a better query.
-    if s.pages:
+    rq = s.next_query
+    if s.pages and not rq:                            # the model named the missing fact: search, do not crawl
         s.hop()
     if s.left() > 12:
-        rq = s.reformulate()
+        rq = rq or s.reformulate()
         if rq:
             hits = web.search([rq], timeout=min(4.0, s.left() - 6))
+            for i, h in enumerate(hits[:8]):
+                if h.snippet:
+                    s.chunks.append(Chunk(h.url, h.title, h.snippet, 45 + i))
             urls = [h.url for h in hits if h.url not in s.seen][:5]
             s.seen.update(urls)
             s._add(web.fetch_many(urls, min(time.time() + 6, s.t_end - 5)), 40)
     if s.left() < 3:
-        return "", [], 0.0
+        return last
     try:
-        return s.ask(s.context())
+        a, cites, conf = s.ask(s.context(rq), final=True)
     except Exception as e:  # noqa: BLE001
         paths.log(f"llm failed (hop): {e}")
-        return "", [], 0.0
+        return last
+    return (a, cites, conf) if a else (s.unverified or ("", [], 0.0))

@@ -1,0 +1,290 @@
+{
+ "questions": [
+  {
+   "question": "What is the atomic number of the chemical element named after Marie Curie's homeland?",
+   "answer": [
+    "84"
+   ]
+  },
+  {
+   "question": "Which river flows through the capital of Hungary?",
+   "answer": [
+    "Danube"
+   ]
+  },
+  {
+   "question": "In what year was the university where Alan Turing earned his PhD founded?",
+   "answer": [
+    "1746"
+   ]
+  },
+  {
+   "question": "What was the population of Lakeville, Minnesota at the 2020 census?",
+   "answer": [
+    "69,490",
+    "69490"
+   ]
+  },
+  {
+   "question": "Who won the Nobel Prize in Literature in 2021?",
+   "answer": [
+    "Gurnah"
+   ]
+  },
+  {
+   "question": "What is the default port of PostgreSQL?",
+   "answer": [
+    "5432"
+   ]
+  },
+  {
+   "question": "How tall is Ras Dashen in metres?",
+   "answer": [
+    "4,550",
+    "4550",
+    "4,533",
+    "4533",
+    "4,543",
+    "4543"
+   ]
+  },
+  {
+   "question": "Who designed the Sydney Opera House?",
+   "answer": [
+    "Utzon"
+   ]
+  },
+  {
+   "question": "What is the chemical formula of caffeine?",
+   "answer": [
+    "C8H10N4O2"
+   ]
+  },
+  {
+   "question": "Which company develops the ROCm software stack?",
+   "answer": [
+    "AMD",
+    "Advanced Micro Devices"
+   ]
+  },
+  {
+   "question": "How many gigabytes of memory does the AMD Instinct MI300X have?",
+   "answer": [
+    "192"
+   ]
+  },
+  {
+   "question": "Who is the first listed author of the paper Attention Is All You Need?",
+   "answer": [
+    "Vaswani"
+   ]
+  },
+  {
+   "question": "What is the boiling point of ethanol in degrees Celsius?",
+   "answer": [
+    "78"
+   ]
+  },
+  {
+   "question": "Who directed the 2019 film Parasite?",
+   "answer": [
+    "Bong Joon"
+   ]
+  },
+  {
+   "question": "In which city is the headquarters of the African Union?",
+   "answer": [
+    "Addis Ababa"
+   ]
+  },
+  {
+   "question": "Which HTTP status code means Too Many Requests?",
+   "answer": [
+    "429"
+   ]
+  },
+  {
+   "question": "Which RFC defines HTTP/3?",
+   "answer": [
+    "9114"
+   ]
+  },
+  {
+   "question": "How long is the Nile river in kilometres?",
+   "answer": [
+    "6,650",
+    "6650",
+    "6,695",
+    "6695",
+    "6,853",
+    "6853",
+    "7,088",
+    "7088"
+   ]
+  },
+  {
+   "question": "Who was the first woman to win the Fields Medal?",
+   "answer": [
+    "Mirzakhani"
+   ]
+  },
+  {
+   "question": "In what year was the Grand Ethiopian Renaissance Dam officially inaugurated?",
+   "answer": [
+    "2025"
+   ]
+  },
+  {
+   "question": "Which PyTorch context manager disables gradient calculation?",
+   "answer": [
+    "no_grad",
+    "no grad",
+    "inference_mode",
+    "inference mode"
+   ]
+  },
+  {
+   "question": "What is the speed of light in metres per second?",
+   "answer": [
+    "299,792,458",
+    "299792458",
+    "299 792 458"
+   ]
+  },
+  {
+   "question": "Which planet in the Solar System has the shortest day?",
+   "answer": [
+    "Jupiter"
+   ]
+  },
+  {
+   "question": "Who painted The Night Watch?",
+   "answer": [
+    "Rembrandt"
+   ]
+  },
+  {
+   "question": "What is the tallest building in Africa?",
+   "answer": [
+    "Iconic Tower"
+   ]
+  },
+  {
+   "question": "Who won the 2022 FIFA World Cup?",
+   "answer": [
+    "Argentina"
+   ]
+  },
+  {
+   "question": "What is the melting point of gold in degrees Celsius?",
+   "answer": [
+    "1064",
+    "1,064"
+   ]
+  },
+  {
+   "question": "What is the largest lake in Ethiopia?",
+   "answer": [
+    "Tana"
+   ]
+  },
+  {
+   "question": "How many bits long is an IPv6 address?",
+   "answer": [
+    "128"
+   ]
+  },
+  {
+   "question": "Which country hosted the 2024 Summer Olympics and in which city?",
+   "answer": [
+    "Paris"
+   ]
+  },
+  {
+   "question": "What is the name of the spacecraft that carried the first humans to the Moon's surface?",
+   "answer": [
+    "Apollo 11",
+    "Eagle"
+   ]
+  },
+  {
+   "question": "Who founded the company that makes the Ryzen processors, and in what year?",
+   "answer": [
+    "1969"
+   ]
+  },
+  {
+   "question": "What is the capital of the country whose national airline is Ethiopian Airlines?",
+   "answer": [
+    "Addis Ababa"
+   ]
+  },
+  {
+   "question": "How many players are on the field for one team in a rugby union match?",
+   "answer": [
+    "15",
+    "fifteen"
+   ]
+  },
+  {
+   "question": "What is the latest LTS release of Ubuntu?",
+   "answer": [
+    "26.04"
+   ]
+  },
+  {
+   "question": "Which programming language is the Linux kernel mainly written in?",
+   "answer": [
+    "C"
+   ]
+  },
+  {
+   "question": "According to this page, in what year was Python 3.0 released?",
+   "url": "https://en.wikipedia.org/wiki/History_of_Python",
+   "answer": [
+    "2008"
+   ]
+  },
+  {
+   "question": "What status code does this document define for Content Too Large?",
+   "url": "https://www.rfc-editor.org/rfc/rfc9110.html",
+   "answer": [
+    "413"
+   ]
+  },
+  {
+   "question": "According to this page, what does json.dumps use as the default item separator and key separator?",
+   "url": "https://docs.python.org/3/library/json.html",
+   "answer": [
+    "', '",
+    "': '",
+    ", "
+   ]
+  },
+  {
+   "question": "On this page, what is the maximum number of redirects requests follows by default?",
+   "url": "https://requests.readthedocs.io/en/latest/api/",
+   "answer": [
+    "30"
+   ]
+  },
+  {
+   "question": "According to this page, who created Git?",
+   "url": "https://git-scm.com/book/en/v2/Getting-Started-A-Short-History-of-Git",
+   "answer": [
+    "Linus Torvalds",
+    "Torvalds"
+   ]
+  },
+  {
+   "question": "According to this page, what is the area of Ethiopia in square kilometres?",
+   "url": "https://en.wikipedia.org/wiki/Ethiopia",
+   "answer": [
+    "1,104,300",
+    "1104300",
+    "1,112,000",
+    "1112000"
+   ]
+  }
+ ]
+}

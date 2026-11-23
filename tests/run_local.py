@@ -127,6 +127,8 @@ print(f"grounding: {len(GROUNDING) - len(g_bad)}/{len(GROUNDING)} ok" + "".join(
 # A stalling search engine must not hold the whole search (it used to take 3x the
 # timeout, which left no time to read pages). Stub the HTTP layer: no network here.
 from mc4 import web as _web  # noqa: E402
+_web._loaded = True                                   # unit checks below: no saved engine state
+_web._STATE = work / "engines-unit.json"
 
 
 class _WikiOK:
@@ -229,6 +231,102 @@ ok = len(_hits) == 9 and "Things_Fall_Apart" in _hits[0].url
 fails += not ok
 print(f"junk hits demoted: {'ok' if ok else 'FAIL'} first of {len(_hits)} = {_hits[0].url if _hits else None}")
 _web._get = _real_get
+
+# An engine with no hits three searches in a row is rested, retried on every 6th search,
+# and at least two engines always stay in use.
+_calls = []
+_fn0 = dict(_web._ENGINE_FN)
+_web._ENGINE_FN.update({
+    "bing": lambda q, t: (_calls.append("bing"), [_web.Hit("https://example.org/b", "Eiffel Tower opened", "opened 1889", "bing")])[1],
+    "yahoo": lambda q, t: (_calls.append("yahoo"), [_web.Hit("https://example.org/y", "Eiffel Tower opened", "opened 1889", "yahoo")])[1],
+    "ddg": lambda q, t: (_calls.append("ddg"), [])[1]})
+_web.ENGINES[:] = ["ddg", "bing", "yahoo"]
+_web._misses.clear(); _web._searches = 0
+_seen = []
+for _i in range(1, 8):
+    _calls.clear()
+    _web.search(["eiffel tower opened"], timeout=1.0)
+    _seen.append("ddg" in _calls)
+ok = _seen == [True, True, True, False, False, True, False]
+_web._ENGINE_FN.update({"bing": lambda q, t: [], "yahoo": lambda q, t: []})
+_web._misses.clear(); _web._searches = 0
+for _i in range(5):
+    _calls.clear()
+    _web.search(["eiffel tower opened"], timeout=1.0)
+ok = ok and "ddg" in _calls                      # everything is failing: nothing is rested
+fails += not ok
+print(f"engine rest: {'ok' if ok else 'FAIL'} ddg tried on searches {[i + 1 for i, v in enumerate(_seen) if v]}")
+_web._ENGINE_FN.clear(); _web._ENGINE_FN.update(_fn0)
+_web.ENGINES[:] = _e
+_web._misses.clear(); _web._searches = 0
+
+# New grounding paths: long list with one odd spelling, symbol-only answer, and the
+# two-step flow where the model asks for one more search.
+from mc4 import pipeline as _pl  # noqa: E402
+from mc4.rank import Chunk as _Chunk  # noqa: E402
+ok = (_pl.partly_grounded("Ann Lee, Bob Roy, Cy Dunn", "founded by Ann Lee, Bob Roy and Cyrus Dunn")
+      and not _pl.partly_grounded("Ann Lee, Bob Roy", "founded by Ann Lee")
+      and not _pl.partly_grounded("Ann Lee, Zed Poe, Cy Dunn", "founded by Ann Lee"))
+fails += not ok
+_cut = '{"found": true, "answer": "Ann Lee, Bob Roy", "source": "S2", "quote": "founded by Ann Lee, Bob R'
+ok = ok and _pl.parse_json(_cut) == {"answer": "Ann Lee, Bob Roy", "source": "S2"} and _pl.parse_json('{"found": tr') == {}
+fails += not ok
+print(f"partial list grounding + cut-off reply: {'ok' if ok else 'FAIL'}")
+
+
+class _LLM:
+    def __init__(self, replies):
+        self.replies, self.prompts = list(replies), []
+
+    def chat(self, system, text, max_new_tokens=120):
+        self.prompts.append(text)
+        return self.replies.pop(0)
+
+
+_s = _pl.Session("What separator does dumps use?", None, 20, _LLM(['{"found": true, "answer": "\', \'", "source": "S1", "quote": "x"}']))
+_c = _Chunk("https://example.org/j", "json", "the default item separator is ', ' for lists", 0)
+_a = _s.ask([_c])
+ok = _a[0] == "', '" and _a[1] == ["https://example.org/j"]
+_s = _pl.Session("What separator does dumps use?", None, 20, _LLM(['{"found": true, "answer": "| |", "source": "S1", "quote": "x"}']))
+ok = ok and _s.ask([_c])[0] == ""
+fails += not ok
+print(f"symbol answer: {'ok' if ok else 'FAIL'} {_a}")
+
+_pg = {"https://example.org/t": ("Turing", ["Alan Turing earned his PhD at Princeton University in 1938."]),
+       "https://example.org/p": ("Princeton University", ["Princeton University was founded in 1746 in Elizabeth, New Jersey."])}
+_asked = []
+
+
+def _fake_search(qs, timeout):
+    _asked.append(qs)
+    u = "https://example.org/p" if "Princeton" in qs[0] else "https://example.org/t"
+    return [_web.Hit(u, _pg[u][0], "", "bing")]
+
+
+def _fake_fetch_many(urls, deadline):
+    return [_web.Page(url=u, title=_pg[u][0], lines=_pg[u][1], ok=True) for u in urls if u in _pg]
+
+
+_keep = (_web.search, _web.fetch_many)
+_web.search, _web.fetch_many = _fake_search, _fake_fetch_many
+_llm = _LLM(['Alan Turing PhD university founded',
+             '{"found": false, "search": "Princeton University founded year"}',
+             '{"found": true, "answer": "1746", "source": "S1", "quote": "Princeton University was founded in 1746"}'])
+_r = _pl.answer("In what year was the university where Alan Turing earned his PhD founded?", None, 20, _llm)
+_web.search, _web.fetch_many = _keep
+ok = (_r[0] == "1746" and _r[1] == ["https://example.org/p"] and _asked[-1] == ["Princeton University founded year"]
+      and '"search"' in _llm.prompts[1] and '"search"' not in _llm.prompts[2] and _asked[0][-1] == "Alan Turing PhD university founded")
+fails += not ok
+print(f"two-step question: {'ok' if ok else 'FAIL'} {_r}")
+_web.search, _web.fetch_many = _fake_search, _fake_fetch_many
+_llm = _LLM(['x', '{"found": true, "answer": "Yale", "source": "S1", "quote": "nope"}', 'y',
+             '{"found": true, "answer": "Yale", "source": "S1", "quote": "nope"}'])
+_r = _pl.answer("Which university did Alan Turing earn his PhD at?", None, 20, _llm)
+_r2 = _pl.answer("Which university did Alan Turing earn his PhD at?", None, 20, _LLM(['x', '{"found": false}', 'y', '{"found": false}']))
+_web.search, _web.fetch_many = _keep
+ok = _r[0] == "Yale" and _r[2] == 0.2 and len(_r[1]) == 1 and _r2 == ("", [], 0.0)
+fails += not ok
+print(f"unverified answer kept at low confidence, not-found stays empty: {'ok' if ok else 'FAIL'} {_r} {_r2}")
 
 print(f"\nscore {score}/{len(QS)}   failures {fails}   work dir {work}")
 subprocess.run(["pkill", "-f", "mc4/server.py"])

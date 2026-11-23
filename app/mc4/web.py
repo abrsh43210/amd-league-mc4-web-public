@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 import re
 import time
@@ -336,14 +337,61 @@ ENGINE_WEIGHT = {"wiki": 1.5, "ddg": 1.2, "yahoo": 1.1, "bing": 1.0, "mojeek": 0
 _ENGINE_FN = {"ddg": _ddg, "bing": _bing, "wiki": _wiki, "mojeek": _mojeek, "yahoo": _yahoo}
 
 
+# An engine that is unreachable from the grader's network would make every search
+# wait for the full timeout. After RESTING_AFTER searches in a row without a single
+# hit, an engine is rested; it is tried again every RETRY_EVERY-th search so it can
+# come back. At least two engines always stay in use. Wikipedia is never rested: when
+# it is throttled it says so at once, which costs no time.
+RESTING_AFTER, RETRY_EVERY = 3, 6
+NEVER_REST = ("wiki",)
+_misses: dict[str, int] = {}
+_searches = 0
+_loaded = False
+_STATE = paths.WORK_DIR / "engines.json"              # app.py may be started once per question
+
+
+def _load_state() -> None:
+    global _loaded, _searches
+    if _loaded:
+        return
+    _loaded = True
+    try:
+        d = json.loads(_STATE.read_text(encoding="utf-8"))
+        _searches = int(d.get("searches", 0))
+        _misses.update({str(k): int(v) for k, v in dict(d.get("misses", {})).items()})
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+
+
+def _save_state() -> None:
+    try:
+        _STATE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _STATE.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"searches": _searches, "misses": _misses}), encoding="utf-8")
+        os.replace(tmp, _STATE)
+    except OSError:
+        pass
+
+
+def _engines_now() -> list[str]:
+    all_e = [e for e in ENGINES if e in _ENGINE_FN]
+    if _searches % RETRY_EVERY == 0:
+        return all_e
+    live = [e for e in all_e if e in NEVER_REST or _misses.get(e, 0) < RESTING_AFTER]
+    return live if len(live) >= 2 else all_e
+
+
 def search(queries: list[str], timeout: float) -> list[Hit]:
     """Query every engine with every query in parallel; fuse by reciprocal rank."""
     from .rank import terms
+    global _searches
+    _load_state()
+    _searches += 1
+    engines = _engines_now()
+    got: dict[str, int] = {e: 0 for e in engines}
     jobs = []
     for q in queries:
-        for e in ENGINES:
-            if e not in _ENGINE_FN:
-                continue
+        for e in engines:
             # Bing and Mojeek answer bot traffic poorly for question-form queries
             # (Bing collapses them to one word): send them keywords only.
             if q.startswith("site:"):
@@ -382,6 +430,7 @@ def search(queries: list[str], timeout: float) -> list[Hit]:
                 paths.log(f"engine {futs[f]} error {e}")
                 continue
             paths.log(f"engine {futs[f][0]} -> {len(res)} hits")
+            got[futs[f][0]] += len(res)
             for i, h in enumerate(res[:10]):
                 if not h.url:
                     continue
@@ -395,6 +444,11 @@ def search(queries: list[str], timeout: float) -> list[Hit]:
     except Exception:  # noqa: BLE001 - as_completed timeout: keep what we have
         paths.log("search timed out; using partial results")
     ex.shutdown(wait=False, cancel_futures=True)
+    for e, n in got.items():
+        _misses[e] = 0 if n else _misses.get(e, 0) + 1
+        if _misses[e] == RESTING_AFTER and e not in NEVER_REST:
+            paths.log(f"engine {e}: no hits in {RESTING_AFTER} searches, resting it")
+    _save_state()
     order = sorted(scores, key=lambda k: -scores[k])
     return [best[k] for k in order]
 
