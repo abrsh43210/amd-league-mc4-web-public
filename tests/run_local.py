@@ -93,7 +93,7 @@ for args, stems in cases:
         f = work / "output" / f"{st}_output.json"
         try:
             d = json.load(open(f))
-            assert set(d) == {"answer", "citations", "confidence"}
+            assert {"answer", "citations", "sources", "source", "confidence", "text"} <= set(d) and d["sources"] == d["citations"] and d["text"] == d["answer"]
             print(f"robust {st}: ok {dt:.1f}s {d}")
         except Exception as e:  # noqa: BLE001
             fails += 1

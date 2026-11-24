@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
@@ -26,6 +27,7 @@ URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
 SKIP_HOSTS = ("youtube.com", "youtu.be", "facebook.com", "instagram.com", "tiktok.com", "x.com",
               "twitter.com", "pinterest.", "linkedin.com")
 CONTEXT_WORDS = 1500
+EXPAND_CAP_S = 3.0          # the query-rewrite call never holds up searching for longer than this
 
 SYSTEM = ("You answer questions using only the numbered web sources you are given. "
           "Reply with one JSON object and nothing else.")
@@ -172,6 +174,11 @@ def clean_answer(a: str) -> str:
 _FIELD = r'"%s"\s*:\s*"((?:[^"\\]|\\.)*)"'
 
 
+NON_ANSWER_RE = re.compile(r"(?:n/?a|none|null|unknown|not (?:stated|mentioned|specified|given|provided|available|found|"
+                           r"known|listed|clear)(?: (?:in|on) the (?:sources?|pages?|text))?|no (?:answer|information|data)"
+                           r"(?: (?:available|found|given))?|unclear|cannot be determined)[.!]?", re.I)
+
+
 def parse_json(text: str) -> dict:
     m = re.search(r"\{.*\}", text or "", re.S)
     if m:
@@ -182,6 +189,9 @@ def parse_json(text: str) -> dict:
             pass
     # A long list answer can use up the output budget before the closing brace:
     # keep the fields that were written completely.
+    if re.search(r'"found"\s*:\s*false', text or ""):
+        f = re.search(_FIELD % "search", text or "")
+        return {"found": False, "search": f.group(1)} if f else {"found": False}
     out = {}
     for k in ("answer", "source", "quote"):
         f = re.search(_FIELD % k, text or "")
@@ -198,8 +208,16 @@ def _start_urls(question: str, url: str | None) -> list[str]:
     return list(dict.fromkeys(u.rstrip(".,;") for u in urls if u))
 
 
+# Words that point at the given page ("According to this page, ...") mean nothing to a
+# search engine and push the real terms down: drop them from search queries only.
+DEICTIC_RE = re.compile(r"\b(according to|as stated (on|in)|based on|on|in|from|per)\s+(this|the given|the linked|the above)\s+"
+                        r"(web ?page|page|site|website|article|document|doc|link|url|post|source)\b[\s,:]*", re.I)
+
+
 def _queries(question: str) -> list[str]:
-    q = URL_RE.sub("", question).strip()
+    q = DEICTIC_RE.sub(" ", URL_RE.sub("", question))
+    q = " ".join(q.split()).strip(" ,")
+    q = q[:1].upper() + q[1:]
     kw = " ".join(terms(q)[:12])
     out = [q[:300]]
     if kw and kw.lower() != q.lower():
@@ -270,11 +288,24 @@ class Session:
     def expand(self) -> None:
         """One short model call: a direct search query, with indirect references
         resolved ("the university where Turing earned his PhD" -> "Princeton")."""
-        try:
-            raw = self.llm.chat("", EXPAND.format(q=self.q), max_new_tokens=24)
-        except Exception as e:  # noqa: BLE001
-            paths.log(f"expand failed: {type(e).__name__}: {e}")
+        ready = getattr(self.llm, "ready", None)
+        if ready is not None and not ready():         # still loading: searching cannot wait for it
+            paths.log("expand skipped: model not ready")
             return
+        box: dict = {}
+
+        def run() -> None:
+            try:
+                box["raw"] = self.llm.chat("", EXPAND.format(q=self.q), max_new_tokens=24)
+            except Exception as e:  # noqa: BLE001
+                box["err"] = e
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(min(EXPAND_CAP_S, max(0.0, self.left() - 15)))
+        if "raw" not in box:                          # slow or failed: search with the question alone
+            paths.log(f"expand gave up: {box.get('err') or 'over the time cap'}")
+            return
+        raw = box["raw"]
         line = next((ln for ln in str(raw).splitlines() if ln.strip()), "")
         x = " ".join(URL_RE.sub("", line).strip().strip('"\'').split()[:10])[:120]
         if norm(x) and norm(x) not in norm(self.q) and norm(self.q) not in norm(x):
@@ -349,11 +380,11 @@ class Session:
             paths.log(f"ungrounded symbol answer dropped: {ans!r}")
             return "", [], 0.0
         if cited and grounded(ans, cited.text):
-            return ans, [cited.url], 0.9
+            return ans, [self._site_cite(ans, cited.url)], 0.9
         quote = str(d.get("quote", ""))
         for c in ctx + self.chunks:                   # grounded elsewhere: cite that page instead
             if grounded(ans, c.text):
-                return ans, [c.url], 0.7
+                return ans, [self._site_cite(ans, c.url)], 0.7
         if cited and quote and norm(quote) and norm(quote) in norm(cited.text) and not norm(ans) in norm(self.q):
             return ans, [cited.url], 0.5             # paraphrased value, quote is real
         if cited and partly_grounded(ans, cited.text):
@@ -362,9 +393,22 @@ class Session:
                 and _mostly(ans, quote + " " + cited.text, 0.8) and not norm(ans) in norm(self.q)):
             return ans, [cited.url], 0.4             # quote slightly reworded, answer words are on the page
         paths.log(f"ungrounded answer set aside: {ans!r}")
-        if self.unverified is None and not norm(ans) in norm(self.q):
+        if self.unverified is None and not norm(ans) in norm(self.q) and not NON_ANSWER_RE.fullmatch(ans):
             self.unverified = (ans, [cited.url] if cited else [ctx[0].url], 0.2)
         return "", [], 0.0                            # not on any page we read
+
+    def _site_cite(self, ans: str, url: str) -> str:
+        """A start URL was given: cite a page of that site when the answer is on one."""
+        if not self.starts:
+            return url
+        host = urlparse(self.starts[0]).netloc.lower().removeprefix("www.")
+        if urlparse(url).netloc.lower().removeprefix("www.").endswith(host):
+            return url
+        for c in self.chunks:
+            if urlparse(c.url).netloc.lower().removeprefix("www.").endswith(host) and grounded(ans, c.text):
+                paths.log(f"citation moved to the given site: {c.url}")
+                return c.url
+        return url
 
     def heuristic(self, ctx: list[Chunk]) -> tuple[str, list[str], float]:
         """No model available: return the best-matching sentence from the best chunk."""
